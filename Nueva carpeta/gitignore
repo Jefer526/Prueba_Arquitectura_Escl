@@ -1,0 +1,12 @@
+.env
+*.env.local
+data/
+backups/
+docker-compose.override.yml
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.log
+configs/ssl/

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Ecosystem Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container { max-width: 900px; padding: 2rem; text-align: center; }
+        h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6, #ec4899);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+        .subtitle { color: #94a3b8; margin-bottom: 2.5rem; font-size: 1.1rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.2rem;
+            margin-top: 2rem;
+        }
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 14px;
+            padding: 1.8rem 1.5rem;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            color: #e2e8f0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .card:hover {
+            border-color: #3b82f6;
+            transform: translateY(-4px);
+            box-shadow: 0 8px 30px rgba(59, 130, 246, 0.15);
+        }
+        .card .icon { font-size: 2.5rem; margin-bottom: 0.8rem; }
+        .card h3 { margin-bottom: 0.4rem; font-size: 1.15rem; }
+        .card p { font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.6rem; }
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.7rem;
+            border-radius: 9999px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+        .badge-green { background: #064e3b; color: #34d399; }
+        .badge-blue  { background: #1e3a5f; color: #60a5fa; }
+        .badge-purple { background: #3b1f6e; color: #c084fc; }
+        .footer {
+            margin-top: 3rem;
+            color: #475569;
+            font-size: 0.8rem;
+        }
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #34d399;
+            margin-right: 4px;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 AI Ecosystem</h1>
+        <p class="subtitle">Atención al Cliente Aumentada por IA — Sandbox MVP</p>
+
+        <div class="grid">
+            <a class="card" href="/n8n/">
+                <div class="icon">⚡</div>
+                <h3>N8n</h3>
+                <p>Workflow Automation Engine</p>
+                <span class="badge badge-green">Orchestrator</span>
+            </a>
+
+            <a class="card" href="/chatwoot/">
+                <div class="icon">💬</div>
+                <h3>Chatwoot</h3>
+                <p>Customer Engagement Platform</p>
+                <span class="badge badge-green">Omnichannel</span>
+            </a>
+
+            <a class="card" href="/chat/">
+                <div class="icon">🤖</div>
+                <h3>LibreChat</h3>
+                <p>AI Chat Interface (Multi-LLM)</p>
+                <span class="badge badge-purple">AI Gateway</span>
+            </a>
+
+            <a class="card" href="/data/">
+                <div class="icon">📊</div>
+                <h3>Data Connector</h3>
+                <p>Jupyter / Deepnote Bridge</p>
+                <span class="badge badge-blue">Analytics</span>
+            </a>
+        </div>
+
+        <div class="footer">
+            <span class="status-dot"></span> Ecosystem Running
+            &nbsp;|&nbsp; SSH: <code>ecosystem status</code>
+        </div>
+    </div>
+</body>
+</html>

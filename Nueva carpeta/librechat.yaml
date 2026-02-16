@@ -1,0 +1,26 @@
+version: 1.1.4
+cache: true
+
+registration:
+  socialLogins: []
+  allowedDomains: []
+
+endpoints:
+  # OpenAI - Configure with your API key in LibreChat UI
+  openAI:
+    titleModel: "gpt-3.5-turbo"
+
+  # Custom endpoints for additional LLM providers
+  # Uncomment and configure as needed:
+  # custom:
+  #   - name: "Anthropic"
+  #     apiKey: "${ANTHROPIC_API_KEY}"
+  #     baseURL: "https://api.anthropic.com/v1"
+  #     models:
+  #       default: ["claude-sonnet-4-20250514"]
+  #
+  #   - name: "Local Ollama"
+  #     apiKey: "ollama"
+  #     baseURL: "http://host.docker.internal:11434/v1"
+  #     models:
+  #       default: ["llama3", "mistral"]

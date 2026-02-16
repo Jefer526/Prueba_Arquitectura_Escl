@@ -1,0 +1,743 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AI & Automation Ecosystem - Sandbox MVP
+  Stack: N8n + Chatwoot + LibreChat + Jupyter Connector
+  Uses cfn-init for configuration delivery (avoids 16KB UserData limit).
+  Port-based routing: each service on its own port.
+
+# ============================================================================
+# PARAMETERS
+# ============================================================================
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: sandbox
+    AllowedValues: [sandbox, staging, production]
+    Description: Environment identifier.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t2.micro, t3.micro, t3.small, t3.medium]
+    Description: EC2 instance type. t3.micro = Free Tier. t3.small = recommended.
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 Key Pair for SSH access.
+
+  SSHAllowedCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+    Description: CIDR for SSH access. Restrict to your IP (e.g. 203.0.113.50/32).
+
+  SwapSizeGB:
+    Type: Number
+    Default: 4
+    MinValue: 2
+    MaxValue: 8
+    Description: Swap file size in GB.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: SSM path for latest Amazon Linux 2023 AMI (auto-resolves per region).
+
+# ============================================================================
+# RESOURCES
+# ============================================================================
+Resources:
+
+  # --------------------------------------------------------------------------
+  # NETWORKING
+  # --------------------------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ai-ecosystem-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-igw'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-a'
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-b'
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-a'
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-b'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-rt'
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # --------------------------------------------------------------------------
+  # SECURITY GROUPS
+  # --------------------------------------------------------------------------
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web + service ports access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Dashboard (Nginx)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS
+        - IpProtocol: tcp
+          FromPort: 5678
+          ToPort: 5678
+          CidrIp: 0.0.0.0/0
+          Description: N8n
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: Chatwoot
+        - IpProtocol: tcp
+          FromPort: 3080
+          ToPort: 3080
+          CidrIp: 0.0.0.0/0
+          Description: LibreChat
+        - IpProtocol: tcp
+          FromPort: 8888
+          ToPort: 8888
+          CidrIp: 0.0.0.0/0
+          Description: Jupyter
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-web-sg'
+
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH access - restricted
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHAllowedCIDR
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ssh-sg'
+
+  # --------------------------------------------------------------------------
+  # IAM
+  # --------------------------------------------------------------------------
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-ai-ecosystem-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # --------------------------------------------------------------------------
+  # EC2 INSTANCE with CloudFormation::Init
+  # --------------------------------------------------------------------------
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: VPCGatewayAttachment
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          full_setup:
+            - system_config
+            - project_files
+            - launch
+        # ==================================================================
+        # STEP 1: System-level configuration files
+        # ==================================================================
+        system_config:
+          files:
+            /etc/docker/daemon.json:
+              content: |
+                {
+                  "log-driver": "json-file",
+                  "log-opts": { "max-size": "10m", "max-file": "3" },
+                  "storage-driver": "overlay2",
+                  "default-shm-size": "64M"
+                }
+              mode: "000644"
+        # ==================================================================
+        # STEP 2: Project configuration files
+        # NOTE: ${VARIABLE} here is literal text (NOT Fn::Sub), which is
+        # exactly what docker-compose needs for .env interpolation.
+        # ==================================================================
+        project_files:
+          files:
+            /opt/ai-ecosystem/docker-compose.yml:
+              content: |
+                x-common: &common
+                  restart: unless-stopped
+                  environment: &tz
+                    TZ: America/Bogota
+                services:
+                  nginx:
+                    <<: *common
+                    image: nginx:1.25-alpine
+                    container_name: nginx-proxy
+                    ports: ["80:80","443:443"]
+                    volumes:
+                      - ./configs/nginx.conf:/etc/nginx/nginx.conf:ro
+                      - ./configs/index.html:/usr/share/nginx/html/index.html:ro
+                    depends_on: [n8n, chatwoot-web, librechat, jupyter-connector]
+                    networks: [frontend]
+                    deploy: { resources: { limits: { memory: 64M } } }
+                    healthcheck:
+                      test: ["CMD","wget","-qO-","http://localhost/health"]
+                      interval: 30s
+                      timeout: 5s
+                      retries: 3
+                  postgres:
+                    <<: *common
+                    image: pgvector/pgvector:pg15
+                    container_name: postgres
+                    environment:
+                      <<: *tz
+                      POSTGRES_USER: ${POSTGRES_USER}
+                      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+                      POSTGRES_DB: ${POSTGRES_DB}
+                    volumes: [postgres-data:/var/lib/postgresql/data]
+                    networks: [backend]
+                    deploy: { resources: { limits: { memory: 200M }, reservations: { memory: 100M } } }
+                    command: >
+                      postgres
+                        -c shared_buffers=64MB
+                        -c effective_cache_size=128MB
+                        -c work_mem=2MB
+                        -c maintenance_work_mem=32MB
+                        -c max_connections=50
+                        -c wal_buffers=4MB
+                        -c checkpoint_completion_target=0.9
+                        -c random_page_cost=1.1
+                        -c log_min_duration_statement=1000
+                    healthcheck:
+                      test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER}"]
+                      interval: 15s
+                      timeout: 5s
+                      retries: 5
+                  mongodb:
+                    <<: *common
+                    image: mongo:6.0
+                    container_name: mongodb
+                    environment:
+                      <<: *tz
+                      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+                      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+                    volumes: [mongo-data:/data/db]
+                    networks: [backend]
+                    deploy: { resources: { limits: { memory: 256M }, reservations: { memory: 128M } } }
+                    command: mongod --wiredTigerCacheSizeGB 0.25 --quiet --logpath /dev/null
+                    healthcheck:
+                      test: ["CMD","mongosh","--eval","db.adminCommand('ping')"]
+                      interval: 15s
+                      timeout: 5s
+                      retries: 5
+                  redis:
+                    <<: *common
+                    image: redis:7-alpine
+                    container_name: redis
+                    command: >
+                      redis-server
+                        --requirepass ${REDIS_PASSWORD}
+                        --maxmemory 50mb
+                        --maxmemory-policy allkeys-lru
+                        --save ""
+                        --appendonly no
+                    networks: [backend]
+                    deploy: { resources: { limits: { memory: 64M }, reservations: { memory: 32M } } }
+                    healthcheck:
+                      test: ["CMD","redis-cli","-a","${REDIS_PASSWORD}","ping"]
+                      interval: 15s
+                      timeout: 3s
+                      retries: 5
+                  n8n:
+                    <<: *common
+                    image: n8nio/n8n:latest
+                    container_name: n8n
+                    ports: ["5678:5678"]
+                    environment:
+                      <<: *tz
+                      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+                      N8N_BASIC_AUTH_ACTIVE: "true"
+                      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+                      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+                      N8N_SECURE_COOKIE: "false"
+                      N8N_HOST: 0.0.0.0
+                      N8N_PORT: 5678
+                      N8N_PROTOCOL: http
+                      WEBHOOK_URL: http://${HOST_IP}:5678/
+                      N8N_PATH: /
+                      NODE_OPTIONS: "--max-old-space-size=256"
+                      EXECUTIONS_DATA_PRUNE: "true"
+                      EXECUTIONS_DATA_MAX_AGE: 168
+                    volumes: [n8n-data:/home/node/.n8n]
+                    networks: [frontend, backend]
+                    deploy: { resources: { limits: { memory: 300M }, reservations: { memory: 150M } } }
+                    depends_on:
+                      redis: { condition: service_healthy }
+                  chatwoot-web:
+                    <<: *common
+                    image: chatwoot/chatwoot:latest
+                    container_name: chatwoot-web
+                    ports: ["3000:3000"]
+                    environment:
+                      <<: *tz
+                      RAILS_ENV: production
+                      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY_BASE}
+                      FRONTEND_URL: ${CHATWOOT_FRONTEND_URL}
+                      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+                      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+                      RAILS_LOG_TO_STDOUT: "true"
+                      RAILS_MAX_THREADS: 3
+                      WEB_CONCURRENCY: 1
+                      MALLOC_ARENA_MAX: 2
+                    entrypoint: docker/entrypoints/rails.sh
+                    command: ["bundle","exec","rails","s","-p","3000","-b","0.0.0.0"]
+                    networks: [frontend, backend]
+                    deploy: { resources: { limits: { memory: 400M }, reservations: { memory: 200M } } }
+                    depends_on:
+                      postgres: { condition: service_healthy }
+                      redis: { condition: service_healthy }
+                  chatwoot-sidekiq:
+                    <<: *common
+                    image: chatwoot/chatwoot:latest
+                    container_name: chatwoot-sidekiq
+                    environment:
+                      <<: *tz
+                      RAILS_ENV: production
+                      SECRET_KEY_BASE: ${CHATWOOT_SECRET_KEY_BASE}
+                      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+                      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+                      MALLOC_ARENA_MAX: 2
+                    command: ["bundle","exec","sidekiq","-C","config/sidekiq.yml"]
+                    networks: [backend]
+                    deploy: { resources: { limits: { memory: 300M }, reservations: { memory: 150M } } }
+                    depends_on:
+                      postgres: { condition: service_healthy }
+                      redis: { condition: service_healthy }
+                  librechat:
+                    <<: *common
+                    image: ghcr.io/danny-avila/librechat:latest
+                    container_name: librechat
+                    ports: ["3080:3080"]
+                    environment:
+                      <<: *tz
+                      HOST: 0.0.0.0
+                      PORT: 3080
+                      MONGO_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/librechat?authSource=admin
+                      CREDS_KEY: ${LIBRECHAT_CREDS_KEY}
+                      CREDS_IV: ${LIBRECHAT_CREDS_IV}
+                      JWT_SECRET: ${LIBRECHAT_JWT_SECRET}
+                      JWT_REFRESH_SECRET: ${LIBRECHAT_JWT_REFRESH_SECRET}
+                      ALLOW_REGISTRATION: "true"
+                      ALLOW_SOCIAL_LOGIN: "false"
+                      NODE_OPTIONS: "--max-old-space-size=256"
+                    volumes:
+                      - librechat-data:/app/client/public/images
+                      - ./configs/librechat.yaml:/app/librechat.yaml:ro
+                    networks: [frontend, backend]
+                    deploy: { resources: { limits: { memory: 350M }, reservations: { memory: 150M } } }
+                    depends_on:
+                      mongodb: { condition: service_healthy }
+                  jupyter-connector:
+                    <<: *common
+                    image: jupyter/minimal-notebook:latest
+                    container_name: jupyter-connector
+                    ports: ["8888:8888"]
+                    user: root
+                    environment:
+                      <<: *tz
+                      JUPYTER_TOKEN: ${JUPYTER_TOKEN}
+                      JUPYTER_ENABLE_LAB: "yes"
+                      POSTGRES_CONN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+                      MONGO_CONN: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongodb:27017/librechat?authSource=admin
+                    volumes: [jupyter-data:/home/jovyan/work]
+                    networks: [frontend, backend]
+                    deploy: { resources: { limits: { memory: 256M }, reservations: { memory: 128M } } }
+                    command: >
+                      bash -c "pip install --quiet psycopg2-binary pymongo pandas requests &&
+                      start-notebook.sh --NotebookApp.token='${JUPYTER_TOKEN}'
+                      --NotebookApp.base_url='/' --NotebookApp.allow_origin='*'"
+                networks:
+                  frontend:
+                    name: ai-eco-frontend
+                    driver: bridge
+                  backend:
+                    name: ai-eco-backend
+                    driver: bridge
+                    internal: true
+                volumes:
+                  postgres-data: { name: ai-eco-postgres }
+                  mongo-data:    { name: ai-eco-mongo }
+                  n8n-data:      { name: ai-eco-n8n }
+                  librechat-data: { name: ai-eco-librechat }
+                  jupyter-data:  { name: ai-eco-jupyter }
+              mode: "000644"
+            /opt/ai-ecosystem/configs/nginx.conf:
+              content: |
+                worker_processes auto;
+                worker_rlimit_nofile 1024;
+                events { worker_connections 512; use epoll; multi_accept on; }
+                http {
+                  include /etc/nginx/mime.types;
+                  default_type application/octet-stream;
+                  log_format main '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent';
+                  access_log /var/log/nginx/access.log main buffer=16k;
+                  error_log /var/log/nginx/error.log warn;
+                  sendfile on; tcp_nopush on; tcp_nodelay on;
+                  keepalive_timeout 65; client_max_body_size 50M;
+                  gzip on; gzip_vary on; gzip_proxied any; gzip_comp_level 4;
+                  gzip_types text/plain text/css application/json application/javascript text/xml;
+                  limit_req_zone $binary_remote_addr zone=general:10m rate=50r/s;
+                  add_header X-Frame-Options "SAMEORIGIN" always;
+                  add_header X-Content-Type-Options "nosniff" always;
+                  add_header X-XSS-Protection "1; mode=block" always;
+                  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+                  server {
+                    listen 80 default_server;
+                    server_name _;
+                    location /health { access_log off; return 200 '{"status":"ok"}'; add_header Content-Type application/json; }
+                    location / { limit_req zone=general burst=50 nodelay; root /usr/share/nginx/html; index index.html; try_files $uri $uri/ =404; }
+                    location ~ /\.(env|git|htaccess) { deny all; return 404; }
+                  }
+                }
+              mode: "000644"
+            /opt/ai-ecosystem/configs/librechat.yaml:
+              content: |
+                version: 1.1.4
+                cache: true
+                registration:
+                  socialLogins: []
+                  allowedDomains: []
+                endpoints:
+                  openAI:
+                    titleModel: "gpt-3.5-turbo"
+                  custom: []
+              mode: "000644"
+            /opt/ai-ecosystem/configs/index.html:
+              content: |
+                <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Ecosystem</title>
+                <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}.c{max-width:800px;padding:2rem;text-align:center}h1{font-size:2.5rem;background:linear-gradient(135deg,#3b82f6,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.5rem}.s{color:#94a3b8;margin-bottom:2rem}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-top:2rem}.d{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:1.5rem;transition:all .3s;text-decoration:none;color:#e2e8f0}.d:hover{border-color:#3b82f6;transform:translateY(-2px)}.d h3{margin-bottom:.5rem}.d p{font-size:.85rem;color:#94a3b8}</style>
+                <script>const h=window.location.hostname;</script></head>
+                <body><div class="c"><h1>AI Ecosystem</h1><p class="s">Customer Service Augmented by AI - Sandbox</p><div class="g">
+                <a class="d" id="n8n"><h3>N8n</h3><p>Workflow Automation</p></a>
+                <a class="d" id="cw"><h3>Chatwoot</h3><p>Customer Engagement</p></a>
+                <a class="d" id="lc"><h3>LibreChat</h3><p>AI Chat Interface</p></a>
+                <a class="d" id="jp"><h3>Data Connector</h3><p>Jupyter Gateway</p></a>
+                </div></div>
+                <script>
+                document.getElementById('n8n').href='http://'+h+':5678';
+                document.getElementById('cw').href='http://'+h+':3000';
+                document.getElementById('lc').href='http://'+h+':3080';
+                document.getElementById('jp').href='http://'+h+':8888';
+                </script></body></html>
+              mode: "000644"
+            /opt/ai-ecosystem/scripts/stack-manager.sh:
+              content: |
+                #!/bin/bash
+                set -euo pipefail
+                cd /opt/ai-ecosystem
+                CMD=$1
+                if [ -z "$CMD" ]; then CMD=help; fi
+                case "$CMD" in
+                  start)   echo "Starting..."; docker compose up -d --remove-orphans; sleep 10; docker compose ps ;;
+                  stop)    echo "Stopping..."; docker compose down ;;
+                  restart) echo "Restarting..."; docker compose down && docker compose up -d ;;
+                  status)  docker compose ps; echo ""; docker stats --no-stream --format "table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.CPUPerc}}"; echo ""; free -h ;;
+                  logs)    SVC=$2; if [ -z "$SVC" ]; then docker compose logs -f --tail=50; else docker compose logs -f --tail=50 "$SVC"; fi ;;
+                  backup)  D="/opt/ai-ecosystem/backups/$(date +%Y%m%d_%H%M%S)"; mkdir -p "$D"; docker exec postgres pg_dump -U chatwoot chatwoot_production > "$D/pg.sql"; docker exec mongodb mongodump --archive --gzip > "$D/mongo.gz"; echo "Backup: $D" ;;
+                  health)  for s in nginx-proxy n8n chatwoot-web librechat jupyter-connector postgres mongodb redis; do ST=$(docker inspect -f '{{.State.Status}}' "$s" 2>/dev/null || echo "missing"); echo "$s: $ST"; done ;;
+                  *)       echo "Usage: ecosystem {start|stop|restart|status|logs [svc]|backup|health}" ;;
+                esac
+              mode: "000755"
+        # ==================================================================
+        # STEP 3: Generate secrets, .env, run DB migrations, and launch
+        # ==================================================================
+        launch:
+          commands:
+            01_generate_env:
+              command: !Sub |
+                #!/bin/bash
+                set -euo pipefail
+                cd /opt/ai-ecosystem
+                mkdir -p backups
+                PG_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 32)
+                MG_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 32)
+                RD_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+                N8N_KEY=$(openssl rand -hex 32)
+                N8N_AP=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+                CW_SEC=$(openssl rand -hex 32)
+                LC_CRK=$(openssl rand -hex 32)
+                LC_CIV=$(openssl rand -hex 16)
+                LC_JWT=$(openssl rand -hex 32)
+                LC_REF=$(openssl rand -hex 32)
+                JUP_TK=$(openssl rand -hex 24)
+                EC2_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "localhost")
+                cat > .env <<EOF
+                ENVIRONMENT=${EnvironmentName}
+                HOST_IP=${!EC2_IP}
+                POSTGRES_USER=chatwoot
+                POSTGRES_PASSWORD=${!PG_PASS}
+                POSTGRES_DB=chatwoot_production
+                MONGO_INITDB_ROOT_USERNAME=librechat
+                MONGO_INITDB_ROOT_PASSWORD=${!MG_PASS}
+                REDIS_PASSWORD=${!RD_PASS}
+                N8N_ENCRYPTION_KEY=${!N8N_KEY}
+                N8N_BASIC_AUTH_USER=admin
+                N8N_BASIC_AUTH_PASSWORD=${!N8N_AP}
+                CHATWOOT_SECRET_KEY_BASE=${!CW_SEC}
+                CHATWOOT_FRONTEND_URL=http://${!EC2_IP}:3000
+                LIBRECHAT_CREDS_KEY=${!LC_CRK}
+                LIBRECHAT_CREDS_IV=${!LC_CIV}
+                LIBRECHAT_JWT_SECRET=${!LC_JWT}
+                LIBRECHAT_JWT_REFRESH_SECRET=${!LC_REF}
+                JUPYTER_TOKEN=${!JUP_TK}
+                N8N_SECURE_COOKIE=false
+                EOF
+                chmod 600 .env
+                ln -sf /opt/ai-ecosystem/scripts/stack-manager.sh /usr/local/bin/ecosystem
+              cwd: /opt/ai-ecosystem
+            02_pull_images:
+              command: |
+                cd /opt/ai-ecosystem
+                docker compose pull
+              cwd: /opt/ai-ecosystem
+            03_start_databases:
+              command: |
+                cd /opt/ai-ecosystem
+                docker compose up -d postgres mongodb redis
+                echo "Waiting for databases to be healthy..."
+                sleep 20
+                docker compose ps
+              cwd: /opt/ai-ecosystem
+            04_chatwoot_db_prepare:
+              command: |
+                cd /opt/ai-ecosystem
+                docker compose run --rm chatwoot-web bundle exec rails db:prepare
+              cwd: /opt/ai-ecosystem
+            05_start_all:
+              command: |
+                cd /opt/ai-ecosystem
+                docker compose up -d --remove-orphans
+              cwd: /opt/ai-ecosystem
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+        - !Ref SSHSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ai-ecosystem-host'
+        - Key: Environment
+          Value: !Ref EnvironmentName
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/user-data.log) 2>&1
+          echo "=== AI Ecosystem Bootstrap: $(date) ==="
+
+          # 1. Swap (fallocate - no memory allocation needed, instant)
+          fallocate -l ${SwapSizeGB}G /swapfile
+          chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          cat >> /etc/sysctl.conf <<'SC'
+          vm.swappiness=60
+          vm.vfs_cache_pressure=50
+          vm.overcommit_memory=1
+          SC
+          sysctl -p
+
+          # 2. Packages + Docker
+          yum update -y
+          yum install -y docker git htop jq aws-cfn-bootstrap
+          systemctl enable docker && systemctl start docker
+          usermod -aG docker ec2-user
+
+          # 3. Docker Compose v2
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -SL "https://github.com/docker/compose/releases/download/v2.27.0/docker-compose-linux-x86_64" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          systemctl restart docker
+
+          # 4. Run cfn-init to deliver config files, run migrations, and launch
+          mkdir -p /opt/ai-ecosystem/{configs,scripts,backups}
+          /opt/aws/bin/cfn-init -v \
+            --stack ${AWS::StackName} \
+            --resource EC2Instance \
+            --configsets full_setup \
+            --region ${AWS::Region}
+
+          echo "=== Setup Complete: $(date) ==="
+
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${EnvironmentName}-vpc-id'
+
+  PublicSubnets:
+    Description: Public subnet IDs
+    Value: !Join [',', [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+
+  PrivateSubnets:
+    Description: Private subnet IDs
+    Value: !Join [',', [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
+
+  InstancePublicIP:
+    Description: EC2 Public IP
+    Value: !GetAtt EC2Instance.PublicIp
+
+  DashboardURL:
+    Description: AI Ecosystem Dashboard
+    Value: !Sub 'http://${EC2Instance.PublicIp}'
+
+  N8nURL:
+    Description: N8n Workflow Automation
+    Value: !Sub 'http://${EC2Instance.PublicIp}:5678'
+
+  ChatwootURL:
+    Description: Chatwoot Customer Engagement
+    Value: !Sub 'http://${EC2Instance.PublicIp}:3000'
+
+  LibreChatURL:
+    Description: LibreChat AI Interface
+    Value: !Sub 'http://${EC2Instance.PublicIp}:3080'
+
+  DataConnectorURL:
+    Description: Jupyter Data Connector
+    Value: !Sub 'http://${EC2Instance.PublicIp}:8888'
+
+  SSHCommand:
+    Description: SSH command
+    Value: !Sub 'ssh -i <your-key>.pem ec2-user@${EC2Instance.PublicIp}'
